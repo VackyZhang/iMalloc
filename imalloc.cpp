@@ -325,13 +325,13 @@ void* imalloc(size_t bytes)
   mchunkptr bck;          // misc temp for linking
 
   fprintf(stderr, "==========================================================\n");
-  fprintf(stderr, "MIN_CHUNK_SIZE(sizeof(struct malloc_chunk)): %d\n", MIN_CHUNK_SIZE);
-  fprintf(stderr, "MALLOC_ALIGNMENT(2 * sizeof(size_t)): %d\n", MALLOC_ALIGNMENT);
-  fprintf(stderr, "MALLOC_ALIGN_MASK(MALLOC_ALIGNMENT - 1): %d\n", MALLOC_ALIGN_MASK);
-  fprintf(stderr, "MINSIZE((unsigned long)((MIN_CHUNK_SIZE + MALLOC_ALIGN_MASK) & ~MALLOC_ALIGN_MASK)): %d\n", MINSIZE);
+  fprintf(stderr, "MIN_CHUNK_SIZE(sizeof(struct malloc_chunk)): %lu\n", MIN_CHUNK_SIZE);
+  fprintf(stderr, "MALLOC_ALIGNMENT(2 * sizeof(size_t)): %lu\n", MALLOC_ALIGNMENT);
+  fprintf(stderr, "MALLOC_ALIGN_MASK(MALLOC_ALIGNMENT - 1): %lu\n", MALLOC_ALIGN_MASK);
+  fprintf(stderr, "MINSIZE((unsigned long)((MIN_CHUNK_SIZE + MALLOC_ALIGN_MASK) & ~MALLOC_ALIGN_MASK)): %lu\n", MINSIZE);
   fprintf(stderr, "=====================\n");
   fprintf(stderr, "MAX_FAST_SIZE: %d\n", MAX_FAST_SIZE);
-  fprintf(stderr, "request2size(MAX_FAST_SIZE): %d\n", request2size(MAX_FAST_SIZE));
+  fprintf(stderr, "request2size(MAX_FAST_SIZE): %lu\n", request2size(MAX_FAST_SIZE));
   fprintf(stderr, "fastbin_index(request2size(MAX_FAST_SIZE)): %d\n", fastbin_index(request2size(MAX_FAST_SIZE)));
   fprintf(stderr, "NFASTBINS(fastbin_index(request2size(MAX_FAST_SIZE)) + 1): %d\n", fastbin_index(request2size(MAX_FAST_SIZE)) + 1);
   fprintf(stderr, "=====================\n");
@@ -349,10 +349,10 @@ void* imalloc(size_t bytes)
 
   // 将申请的内存大小bytes，切换成内部实际申请的内存大小nb
   nb = request2size(bytes);
-  fprintf(stderr, "from input: %d, get nb: %d\n", bytes, nb);
+  fprintf(stderr, "from input: %zu, get nb: %zu\n", bytes, nb);
 
   // Bypass search if no frees yet
-  fprintf(stderr, "av->mx_fast: %d, mx_fast & ANYCHUNKS_BIT(1U): %d, have_anychunks: %s\n",
+  fprintf(stderr, "av->mx_fast: %zu, mx_fast & ANYCHUNKS_BIT(1U): %lu, have_anychunks: %s\n",
           av->max_fast, (av->max_fast & ANYCHUNKS_BIT), (av->max_fast & ANYCHUNKS_BIT) ? "TRUE" : "FALSE");
   if (!have_anychunks(av))
   {
