@@ -80,6 +80,9 @@ typedef struct malloc_chunk* mbinptr;
 // offset 2 to use otherwise unindexable first 2 bins.
 #define fastbin_index(sz) ((((unsigned int)(sz)) >> 3) - 2)
 
+#define chunk2mem(p) ((void*)((char*)(p) + 2 * SIZE_SZ))
+#define mem2chunk(mem) ((mchunkptr)((char*)(mem) - 2 * SIZE_SZ))
+
 // size field is or'ed with PREV_INUSE when previous adjacent chunk in use.
 #define PREV_INUSE 0x1
 // extract inuse bit of previous chunk
@@ -194,10 +197,31 @@ static void malloc_init_state(mstate av)
 
   // Establish circular links for normal bins.
   fprintf(stderr, "[%s] NBINS: %d\n", __FUNCTION__, NBINS);
+  fprintf(stderr, "%s SIZE_SZ: %lu, SIZE_SZ << 1: %lu\n",
+          __FUNCTION__, SIZE_SZ, SIZE_SZ << 1);
+
+  for (i = 0; i < NBINS*2; ++i)
+  {
+      fprintf(stderr, "bins[%d] = %p\n", i, &(av->bins[i]));
+  }
   for (i = 1; i < NBINS; ++i)
   {
+      fprintf(stderr, "bin_at(i = %d) = %p\n", i, bin_at(av, i));
+  }
+
+  // malloc_state => mchunkptr bins[NBINS * 2];
+  fprintf(stderr, "%s sizeof(mchunkptr): %zu\n", __FUNCTION__, sizeof(mchunkptr));
+  for (i = 1; i < NBINS; ++i)
+  {
+    // bin_at(1) => bins[0]
+    // bin_at(2) => bins[2]
+    // bin_at(3) => bins[4]
+    // ...
+    // bin_at(NBINS - 1: 95) => bins[188]
+    // bins空间是从0到191
     bin = bin_at(av, i);
     bin->fd = bin->bk = bin;
+    // 每次循环到x处，即将x+2，x+3的地址设置为x的地址
   }
 
   av->top_pad = DEFAULT_TOP_PAD;
@@ -213,6 +237,7 @@ static void malloc_init_state(mstate av)
 
   set_max_fast(av, DEFAULT_MXFAST);
 
+  // top设置到bins[0]的地址.
   av->top = initial_top(av);
   av->pagesize = malloc_getpagesize;
 }
@@ -301,6 +326,39 @@ static void malloc_consolidate(mstate av)
   }
 }
 
+static void* sysmalloc(size_t nb, mstate av)
+{
+    mchunkptr old_top;  // incoming value of av->top
+    size_t old_size;    // its size
+    char* old_end;      // its end address
+
+    long size;          // arg to first MORECORE or mmap call
+    char* brk;          // return value from MORECORE
+
+    long correction;    // arg to 2nd MORECORE call
+    char* snd_brk;      // 2nd return val
+
+    size_t front_misalign;  // unusable bytes at front of new space
+    size_t end_misalign;    // partial page left at end of new space
+    char* aligned_brk;      // aligned offset into brk
+
+    mchunkptr p;                    // the allocated/returned chunk
+    mchunkptr remainder;            // remainder from allocation
+    CHUNK_SIZE_T remainder_size;    // its size
+
+    CHUNK_SIZE_T sum;               // for updating stats
+
+    size_t pagemask = av->pagesize - 1;
+
+    if (have_fastchunks(av))
+    {
+        malloc_consolidate(av);
+        return imalloc(nb - MALLOC_ALIGN_MASK);
+    }
+
+    return NULL;
+}
+
 void* imalloc(size_t bytes)
 {
   mstate av = get_malloc_state();
@@ -363,6 +421,19 @@ void* imalloc(size_t bytes)
     goto use_top;
   }
 
-  use_top:
-  return NULL;
+use_top:
+  victim = av->top;
+  size = chunksize(victim);
+  if ((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(nb + MINSIZE))
+  {
+    remainder_size = size - nb;
+    remainder = chunk_at_offset(victim, nb);
+    av->top = remainder;
+    set_head(victim, nb | PREV_INUSE);
+    set_head(remainder, remainder_size | PREV_INUSE);
+    return chunk2mem(victim);
+  }
+
+  // If no space in top, relay to handle system-dependent cases.
+  return sysmalloc(nb, av);
 }
