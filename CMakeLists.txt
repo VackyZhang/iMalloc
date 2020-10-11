@@ -3,4 +3,4 @@ project(dlmalloc_src)
 
 set(CMAKE_CXX_STANDARD 14)
 
-add_executable(dlmalloc_src imalloc.cpp main.cpp)
+add_executable(imalloc imalloc.cpp main.cpp)
