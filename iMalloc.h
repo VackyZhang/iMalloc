@@ -5,4 +5,6 @@
 
 void* imalloc(size_t bytes);
 
+void ifree(void* mem);
+
 #endif//DLMALLOC_SRC_IMALLOC_H_

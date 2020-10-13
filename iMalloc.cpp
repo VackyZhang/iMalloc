@@ -19,6 +19,10 @@ typedef struct malloc_chunk* mbinptr;
 #define SIZE_SZ   (sizeof(size_t))
 #define CHUNK_SIZE_T unsigned long
 
+#ifndef MORECORE
+#define MORECORE sbrk
+#endif
+
 #define MMAP(addr, size, prot, flags) (mmap((addr), (size), (prot), (flags)|MAP_ANONYMOUS, -1, 0))
 
 #define DEFAULT_TOP_PAD   (0)
@@ -51,6 +55,14 @@ typedef struct malloc_chunk* mbinptr;
 
 #ifndef MORECORE_CONTIGUOUS
 #define MORECORE_CONTIGUOUS   1
+#endif
+
+#ifndef MMAP_AS_MORECORE_SIZE
+#define MMAP_AS_MORECORE_SIZE (1024 * 1024)
+#endif
+
+#ifndef MALLOC_FAILURE_ACTION
+#define MALLOC_FAILURE_ACTION   errno = ENOMEM;
 #endif
 
 #define MORECORE_CONTIGUOUS_BIT  (1U)
@@ -136,6 +148,9 @@ typedef struct malloc_chunk* mbinptr;
 #define set_head(p, s)  ((p)->size = (s))
 
 #define set_foot(p, s)  (((mchunkptr)((char*)(p) + (s)))->prev_size = (s))
+
+#define contiguous(M) (((M)->morecore_properties & MORECORE_CONTIGUOUS_BIT))
+#define set_contiguous(M) ((M)->morecore_properties |= MORECORE_CONTIGUOUS_BIT)
 
 // Take a chunk off a bin list.
 #define unlink(P, BK, FD) \
@@ -410,8 +425,167 @@ static void* sysmalloc(size_t nb, mstate av)
     }
   }
 #endif
+  old_top = av->top;
+  old_size = chunksize(old_top);
+  old_end = (char*)(chunk_at_offset(old_top, old_size));
 
-  return NULL;
+  brk = snd_brk = (char*)(MORECORE_FAILURE);
+
+  // Request enough space for nb + pad + overhead.
+  size = nb + av->top_pad + MINSIZE;
+
+  if (contiguous(av))
+  {
+    size -= old_size;
+  }
+
+  size = (size + pagemask) & ~pagemask;
+
+  if (size > 0)
+  {
+      brk = (char*)(MORECORE(size));
+  }
+
+#if HAVE_MMAP
+  if (brk == (char*)(MORECORE_FAILURE))
+  {
+    if (contiguous(av))
+    {
+      size = (size + old_size + pagemask) & ~pagemask;
+    }
+
+    if ((CHUNK_SIZE_T)(size) < (CHUNK_SIZE_T)(MMAP_AS_MORECORE_SIZE))
+    {
+      size = MMAP_AS_MORECORE_SIZE;
+    }
+
+    if ((CHUNK_SIZE_T)(size) > (CHUNK_SIZE_T)(nb))
+    {
+      brk = (char*)(MMAP(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE));
+      if (brk != (char*)(MORECORE_FAILURE))
+      {
+        snd_brk = brk + size;
+        set_noncontiguous(av);
+      }
+    }
+  }
+#endif
+
+  if (brk != (char*)(MORECORE_FAILURE))
+  {
+    av->sbrked_mem += size;
+
+    if (brk == old_end && snd_brk == (char*)(MORECORE_FAILURE))
+    {
+      set_head(old_top, (size + old_size) | PREV_INUSE);
+    }
+    else
+    {
+      front_misalign = 0;
+      end_misalign = 0;
+      correction = 0;
+      aligned_brk = brk;
+
+      if (contiguous(av) && old_size != 0 && brk < old_end)
+      {
+        set_noncontiguous(av);
+      }
+
+      if (contiguous(av))
+      {
+        if (old_size != 0)
+        {
+          av->sbrked_mem += brk - old_end;
+        }
+
+        front_misalign = (size_t)chunk2mem(brk) & MALLOC_ALIGN_MASK;
+        if (front_misalign > 0)
+        {
+          correction = MALLOC_ALIGNMENT - front_misalign;
+          aligned_brk += correction;
+        }
+
+        correction += old_size;
+
+        end_misalign = (size_t)(brk + size + correction);
+        correction += ((end_misalign + pagemask) & ~pagemask) - end_misalign;
+
+        snd_brk = (char*)(MORECORE(correction));
+
+        if (snd_brk == (char*)(MORECORE_FAILURE))
+        {
+          correction = 0;
+          snd_brk = (char*)(MORECORE(0));
+        }
+        else if (snd_brk < brk)
+        {
+          snd_brk = brk + size;
+          correction = 0;
+          set_noncontiguous(av);
+        }
+      }
+      else
+      {
+        if (snd_brk == (char*)(MORECORE_FAILURE))
+        {
+          snd_brk = (char*)(MORECORE(0));
+          av->sbrked_mem += snd_brk - brk - size;
+        }
+      }
+
+      if (snd_brk != (char*)(MORECORE_FAILURE))
+      {
+        av->top = (mchunkptr)aligned_brk;
+        set_head(av->top, (snd_brk - aligned_brk + correction) | PREV_INUSE);
+        av->sbrked_mem += correction;
+
+        if (old_size != 0)
+        {
+          old_size = (old_size - 3 * SIZE_SZ) & ~MALLOC_ALIGN_MASK;
+          set_head(old_top, old_size | PREV_INUSE);
+
+          chunk_at_offset(old_top, old_size)->size = SIZE_SZ | PREV_INUSE;
+          chunk_at_offset(old_top, old_size + SIZE_SZ)->size = SIZE_SZ | PREV_INUSE;
+
+          if (old_size >= MINSIZE)
+          {
+            size_t tt = av->trim_threshold;
+            av->trim_threshold = (size_t)(-1);
+            ifree(chunk2mem(old_top));
+            av->trim_threshold = tt;
+          }
+        }
+      }
+    }
+
+    sum = av->sbrked_mem;
+    if (sum > (CHUNK_SIZE_T)(av->max_sbrked_mem))
+    {
+      av->max_sbrked_mem = sum;
+    }
+
+    sum += av->mmapped_mem;
+    if (sum > (CHUNK_SIZE_T)(av->max_total_mem))
+    {
+      av->max_total_mem = sum;
+    }
+
+    p = av->top;
+    size = chunksize(p);
+
+    if ((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(nb + MINSIZE))
+    {
+      remainder_size = size - nb;
+      remainder = chunk_at_offset(p, nb);
+      av->top = remainder;
+      set_head(p, nb | PREV_INUSE);
+      set_head(remainder, remainder_size | PREV_INUSE);
+      return chunk2mem(p);
+    }
+  }
+
+  MALLOC_FAILURE_ACTION
+  return 0;
 }
 
 void* imalloc(size_t bytes)
@@ -491,4 +665,9 @@ void* imalloc(size_t bytes)
 
   // If no space in top, relay to handle system-dependent cases.
   return sysmalloc(nb, av);
+}
+
+void ifree(void* mem)
+{
+
 }
