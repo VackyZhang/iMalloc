@@ -81,6 +81,9 @@ typedef struct malloc_chunk* mbinptr;
 #define set_noncontiguous(M)  ((M)->morecore_properties &= ~MORECORE_CONTIGUOUS_BIT)
 
 #define SMALLBIN_WIDTH      8
+#define MIN_LARGE_SIZE      256
+
+#define in_smallbin_range(sz)   ((CHUNK_SIZE_T)(sz) < (CHUNK_SIZE_T)MIN_LARGE_SIZE)
 
 #define MIN_CHUNK_SIZE (sizeof(struct malloc_chunk))
 
@@ -648,6 +651,21 @@ void* imalloc(size_t bytes)
       malloc_consolidate(av);
     }
     goto use_top;
+  }
+
+  if ((CHUNK_SIZE_T)(nb) <= (CHUNK_SIZE_T)(av->max_fast))
+  {
+    fb = &(av->fastbins[(fastbin_index(nb))]);
+    if ((victim = *fb) != 0)
+    {
+      *fb = victim->fd;
+      return chunk2mem(victim);
+    }
+  }
+
+  if (in_smallbin_range(nb))
+  {
+
   }
 
   use_top:
