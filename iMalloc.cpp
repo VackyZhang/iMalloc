@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <unistd.h>
+#include <sys/mman.h>
 
 struct malloc_chunk
 {
@@ -18,10 +19,16 @@ typedef struct malloc_chunk* mbinptr;
 #define SIZE_SZ   (sizeof(size_t))
 #define CHUNK_SIZE_T unsigned long
 
+#define MMAP(addr, size, prot, flags) (mmap((addr), (size), (prot), (flags)|MAP_ANONYMOUS, -1, 0))
+
 #define DEFAULT_TOP_PAD   (0)
 
 #ifndef HAVE_MMAP
 #define HAVE_MMAP 1
+#endif
+
+#ifndef MORECORE_FAILURE
+#define MORECORE_FAILURE (-1)
 #endif
 
 #if HAVE_MMAP
@@ -202,11 +209,11 @@ static void malloc_init_state(mstate av)
 
   for (i = 0; i < NBINS*2; ++i)
   {
-      fprintf(stderr, "bins[%d] = %p\n", i, &(av->bins[i]));
+    fprintf(stderr, "bins[%d] = %p\n", i, &(av->bins[i]));
   }
   for (i = 1; i < NBINS; ++i)
   {
-      fprintf(stderr, "bin_at(i = %d) = %p\n", i, bin_at(av, i));
+    fprintf(stderr, "bin_at(i = %d) = %p\n", i, bin_at(av, i));
   }
 
   // malloc_state => mchunkptr bins[NBINS * 2];
@@ -328,35 +335,83 @@ static void malloc_consolidate(mstate av)
 
 static void* sysmalloc(size_t nb, mstate av)
 {
-    mchunkptr old_top;  // incoming value of av->top
-    size_t old_size;    // its size
-    char* old_end;      // its end address
+  mchunkptr old_top;  // incoming value of av->top
+  size_t old_size;    // its size
+  char* old_end;      // its end address
 
-    long size;          // arg to first MORECORE or mmap call
-    char* brk;          // return value from MORECORE
+  long size;          // arg to first MORECORE or mmap call
+  char* brk;          // return value from MORECORE
 
-    long correction;    // arg to 2nd MORECORE call
-    char* snd_brk;      // 2nd return val
+  long correction;    // arg to 2nd MORECORE call
+  char* snd_brk;      // 2nd return val
 
-    size_t front_misalign;  // unusable bytes at front of new space
-    size_t end_misalign;    // partial page left at end of new space
-    char* aligned_brk;      // aligned offset into brk
+  size_t front_misalign;  // unusable bytes at front of new space
+  size_t end_misalign;    // partial page left at end of new space
+  char* aligned_brk;      // aligned offset into brk
 
-    mchunkptr p;                    // the allocated/returned chunk
-    mchunkptr remainder;            // remainder from allocation
-    CHUNK_SIZE_T remainder_size;    // its size
+  mchunkptr p;                    // the allocated/returned chunk
+  mchunkptr remainder;            // remainder from allocation
+  CHUNK_SIZE_T remainder_size;    // its size
 
-    CHUNK_SIZE_T sum;               // for updating stats
+  CHUNK_SIZE_T sum;               // for updating stats
 
-    size_t pagemask = av->pagesize - 1;
+  size_t pagemask = av->pagesize - 1;
 
-    if (have_fastchunks(av))
+  if (have_fastchunks(av))
+  {
+    malloc_consolidate(av);
+    return imalloc(nb - MALLOC_ALIGN_MASK);
+  }
+
+#if HAVE_MMAP
+  if ((CHUNK_SIZE_T)(nb) >= (CHUNK_SIZE_T)(av->mmap_threshold) && (av->n_mmaps < av->n_mmaps_max))
+  {
+    char* mm;
+    size = (nb + SIZE_SZ + MALLOC_ALIGN_MASK + pagemask) & ~pagemask;
+
+    if ((CHUNK_SIZE_T)(size) > (CHUNK_SIZE_T)(nb))
     {
-        malloc_consolidate(av);
-        return imalloc(nb - MALLOC_ALIGN_MASK);
-    }
+      mm = (char*)(MMAP(0, size, PROT_READ|PROT_WRITE, MAP_PRIVATE));
+      if (mm != (char*)(MORECORE_FAILURE))
+      {
+        front_misalign = (size_t)chunk2mem(mm) & MALLOC_ALIGN_MASK;
+        if (front_misalign > 0)
+        {
+          correction = MALLOC_ALIGNMENT - front_misalign;
+          p = (mchunkptr)(mm + correction);
+          p->prev_size = correction;
+          set_head(p, (size - correction) | IS_MMAPPED);
+        }
+        else
+        {
+          p = (mchunkptr)mm;
+          p->prev_size = 0;
+          set_head(p, size | IS_MMAPPED);
+        }
 
-    return NULL;
+        if (++av->n_mmaps > av->max_n_mmaps)
+        {
+          av->max_n_mmaps = av->n_mmaps;
+        }
+
+        sum = av->mmapped_mem += size;
+        if (sum > (CHUNK_SIZE_T)(av->max_mmapped_mem))
+        {
+          av->max_mmapped_mem = sum;
+        }
+        sum += av->sbrked_mem;
+        if (sum > (CHUNK_SIZE_T)(av->max_total_mem))
+        {
+          av->max_total_mem = sum;
+        }
+
+        return chunk2mem(p);
+      }
+    }
+  }
+#endif
+
+  return NULL;
 }
 
 void* imalloc(size_t bytes)
@@ -421,7 +476,7 @@ void* imalloc(size_t bytes)
     goto use_top;
   }
 
-use_top:
+  use_top:
   victim = av->top;
   size = chunksize(victim);
   if ((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(nb + MINSIZE))
