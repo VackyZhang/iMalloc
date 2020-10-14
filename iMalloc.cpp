@@ -1,4 +1,5 @@
 #include "iMalloc.h"
+#include <cassert>
 #include <cstdio>
 #include <cerrno>
 #include <unistd.h>
@@ -83,16 +84,29 @@ typedef struct malloc_chunk* mbinptr;
 #define SMALLBIN_WIDTH      8
 #define MIN_LARGE_SIZE      256
 
+#define FIRST_SORTED_BIN_SIZE MIN_LARGE_SIZE
+
 #define in_smallbin_range(sz)   ((CHUNK_SIZE_T)(sz) < (CHUNK_SIZE_T)MIN_LARGE_SIZE)
+
+#define smallbin_index(sz)  (((unsigned)(sz)) >> 3)
+
+#define last(b)   ((b)->bk)
 
 #define MIN_CHUNK_SIZE (sizeof(struct malloc_chunk))
 
 #define NBINS   96
+#define NSMALLBINS  32
 
 // Conservatively use 32 bits per map word, even if on 64bit system.
 #define BINMAPSHIFT 5
 #define BITSPERMAP (1U << BINMAPSHIFT)
 #define BINMAPSIZE (NBINS / BITSPERMAP)
+
+#define idx2block(i)  ((i) >> BINMAPSHIFT)
+#define idx2bit(i)    ((1U << ((i) & ((1U << BINMAPSHIFT) - 1))))
+
+#define mark_bin(m, i)  ((m)->binmap[idx2block(i)] |= idx2bit(i))
+#define get_binmap(m, i)  ((m)->binmap[idx2block(i)] & idx2bit(i))
 
 #define MALLOC_ALIGNMENT  (2 * SIZE_SZ)
 #define MALLOC_ALIGN_MASK (MALLOC_ALIGNMENT - 1)
@@ -136,6 +150,8 @@ typedef struct malloc_chunk* mbinptr;
 // addressing -- note that bin_at(0) does not exist.
 #define bin_at(m, i)  ((mbinptr)((char*)&((m)->bins[(i)<<1]) - (SIZE_SZ<<1)))
 
+#define next_bin(b)   ((mbinptr)((char*)(b) + (sizeof(mchunkptr) << 1)))
+
 // The otherwise unindexable 1-bin is used to hold unsorted chunks.
 #define unsorted_chunks(M)  (bin_at(M, 1))
 
@@ -146,6 +162,8 @@ typedef struct malloc_chunk* mbinptr;
 
 // check/set/clear inuse bits in known places.
 #define inuse_bit_at_offset(p, s)   (((mchunkptr)(((char*)(p)) + (s)))->size & PREV_INUSE)
+
+#define set_inuse_bit_at_offset(p, s)   (((mchunkptr)(((char*)(p)) + (s)))->size |= PREV_INUSE)
 
 // Set size/use field.
 #define set_head(p, s)  ((p)->size = (s))
@@ -349,6 +367,32 @@ static void malloc_consolidate(mstate av)
   {
     malloc_init_state(av);
   }
+}
+
+static int largebin_index(unsigned int sz)
+{
+  unsigned int x = sz >> SMALLBIN_WIDTH;
+  unsigned int m;
+
+  if (x >= 0x10000)
+  {
+    return NBINS - 1;
+  }
+
+  {
+    unsigned int n = ((x - 0x100) >> 16) & 8;
+    x <<= n;
+    m = ((x - 0x1000) >> 16) & 4;
+    n += m;
+    x <<= m;
+    m = ((x - 0x4000) >> 16) & 2;
+    n += m;
+    x = (x << m) >> 14;
+    m = 13 - n + (x & ~(x >> 1));
+  }
+
+  // use next 2 bins to create finer-granularity bins.
+  return NSMALLBINS + (m << 2) + ((sz >> (m + 6)) & 3);
 }
 
 static void* sysmalloc(size_t nb, mstate av)
@@ -665,12 +709,204 @@ void* imalloc(size_t bytes)
 
   if (in_smallbin_range(nb))
   {
+    idx = smallbin_index(nb);
+    bin = bin_at(av, idx);
 
+    if ((victim = last(bin)) != bin)
+    {
+      bck = victim->bk;
+      set_inuse_bit_at_offset(victim, nb);
+      bin->bk = bck;
+      bck->fd = bin;
+
+      return chunk2mem(victim);
+    }
+  }
+  else
+  {
+    idx = largebin_index(nb);
+    if (have_fastchunks(av))
+    {
+      malloc_consolidate(av);
+    }
+  }
+
+  while ((victim = unsorted_chunks(av)->bk) != unsorted_chunks(av))
+  {
+    bck = victim->bk;
+    size = chunksize(victim);
+
+    if (in_smallbin_range(nb) && bck == unsorted_chunks(av)
+      && victim == av->last_remainder && (CHUNK_SIZE_T)(size) > (CHUNK_SIZE_T)(nb + MINSIZE))
+    {
+      remainder_size = size - nb;
+      remainder = chunk_at_offset(victim, nb);
+      unsorted_chunks(av)->bk = unsorted_chunks(av)->fd = remainder;
+      av->last_remainder = remainder;
+      remainder->bk = remainder->fd = unsorted_chunks(av);
+
+      set_head(victim, nb | PREV_INUSE);
+      set_head(remainder, remainder_size | PREV_INUSE);
+      set_foot(remainder, remainder_size);
+
+      return chunk2mem(victim);
+    }
+
+    // remove from unsorted list.
+    unsorted_chunks(av)->bk = bck;
+    bck->fd = unsorted_chunks(av);
+
+    if (size == nb)
+    {
+      set_inuse_bit_at_offset(victim, size);
+      return chunk2mem(victim);
+    }
+
+    if (in_smallbin_range(size))
+    {
+      victim_index = smallbin_index(size);
+      bck = bin_at(av, victim_index);
+      fwd = bck->fd;
+    }
+    else
+    {
+      victim_index = largebin_index(size);
+      bck = bin_at(av, victim_index);
+      fwd = bck->fd;
+
+      if (fwd != bck)
+      {
+        if ((CHUNK_SIZE_T)(size) < (CHUNK_SIZE_T)(bck->bk->size))
+        {
+          fwd = bck;
+          bck = bck->bk;
+        }
+        else if ((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(FIRST_SORTED_BIN_SIZE))
+        {
+          size |= PREV_INUSE;
+          while ((CHUNK_SIZE_T)(size) < (CHUNK_SIZE_T)(fwd->size))
+          {
+            fwd = fwd->fd;
+          }
+          bck = fwd->bk;
+        }
+      }
+    }
+
+    mark_bin(av, victim_index);
+    victim->bk = bck;
+    victim->fd = fwd;
+    fwd->bk = victim;
+    bck->fd = victim;
+  }
+
+  if (!in_smallbin_range(nb))
+  {
+    bin = bin_at(av, idx);
+    for (victim = last(bin); victim != bin; victim = victim->bk)
+    {
+      size = chunksize(victim);
+
+      if ((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(nb))
+      {
+        remainder_size = size - nb;
+        unlink(victim, bck, fwd);
+
+        if (remainder_size < MINSIZE)
+        {
+          set_inuse_bit_at_offset(victim, size);
+          return chunk2mem(victim);
+        }
+        else
+        {
+          remainder = chunk_at_offset(victim, nb);
+          unsorted_chunks(av)->bk = unsorted_chunks(av)->fd = remainder;
+          remainder->bk = remainder->fd = unsorted_chunks(av);
+          set_head(victim, nb | PREV_INUSE);
+          set_head(remainder, remainder_size);
+          set_foot(remainder, remainder_size);
+          return chunk2mem(victim);
+        }
+      }
+    }
+  }
+
+  ++idx;
+  bin = bin_at(av, idx);
+  block = idx2block(idx);
+  map = av->binmap[block];
+  bit = idx2bit(idx);
+
+  for (;;)
+  {
+    if (bit > map || bit == 0)
+    {
+      do
+      {
+        if (++block >= BINMAPSIZE)
+        {
+          goto use_top;
+        }
+      } while ((map = av->binmap[block]) == 0);
+
+      bin = bin_at(av, (block << BINMAPSHIFT));
+      bit = 1;
+    }
+
+    while ((bit & map) == 0)
+    {
+      bin = next_bin(bin);
+      bit <<= 1;
+    }
+
+    victim = last(bin);
+
+    if (victim == bin)
+    {
+      av->binmap[block] = map &= ~bit;
+      bin = next_bin(bin);
+      bit <<= 1;
+    }
+    else
+    {
+      size = chunksize(victim);
+
+      assert((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(nb));
+
+      remainder_size = size - nb;
+
+      bck = victim->bk;
+      bin->bk = bck;
+      bck->fd = bin;
+
+      if (remainder_size < MINSIZE)
+      {
+        set_inuse_bit_at_offset(victim, size);
+        return chunk2mem(victim);
+      }
+      else
+      {
+        remainder = chunk_at_offset(victim, nb);
+        unsorted_chunks(av)->bk = unsorted_chunks(av)->fd = remainder;
+        remainder->bk = remainder->fd = unsorted_chunks(av);
+
+        if (in_smallbin_range(nb))
+        {
+          av->last_remainder = remainder;
+        }
+
+        set_head(victim, nb | PREV_INUSE);
+        set_head(remainder, remainder_size | PREV_INUSE);
+        set_foot(remainder, remainder_size);
+        return chunk2mem(victim);
+      }
+    }
   }
 
   use_top:
   victim = av->top;
   size = chunksize(victim);
+
   if ((CHUNK_SIZE_T)(size) >= (CHUNK_SIZE_T)(nb + MINSIZE))
   {
     remainder_size = size - nb;
@@ -678,6 +914,7 @@ void* imalloc(size_t bytes)
     av->top = remainder;
     set_head(victim, nb | PREV_INUSE);
     set_head(remainder, remainder_size | PREV_INUSE);
+
     return chunk2mem(victim);
   }
 
