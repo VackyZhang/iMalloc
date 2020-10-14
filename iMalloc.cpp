@@ -134,6 +134,8 @@ typedef struct malloc_chunk* mbinptr;
 #define chunksize(p) ((p)->size & ~(SIZE_BITS))
 
 // pad request bytes into a usable size -- internal version.
+// req + SIZE_SZ + 2 * SIZE_SZ，并按8byte进行取整。
+// 最小取MINSIZE: (sizeof(malloc_chunk) + MALLOC_ALIGN_MASK) & ~MALLOC_ALIGN_MASK
 #define request2size(req)                               \
   (((req) + SIZE_SZ + MALLOC_ALIGN_MASK < MINSIZE) ?    \
   MINSIZE :                                             \
@@ -674,7 +676,6 @@ void* imalloc(size_t bytes)
   fprintf(stderr, "BINMAPSIZE(NBINS/BITSPERMAP): %d\n", BINMAPSIZE);
   fprintf(stderr, "==========================================================\n");
 
-//fprintf(stderr, "==> (unsigned long)(size_t)(-2 * MINSIZE): %llu\n", (CHUNK_SIZE_T)(size_t)(-2 * MINSIZE));
   if ((CHUNK_SIZE_T)(bytes) >= (CHUNK_SIZE_T)(size_t)(-2 * MINSIZE))
   {
     errno = ENOMEM;
