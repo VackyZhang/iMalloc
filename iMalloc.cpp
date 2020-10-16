@@ -136,6 +136,7 @@ typedef struct malloc_chunk* mbinptr;
 // pad request bytes into a usable size -- internal version.
 // req + SIZE_SZ + 2 * SIZE_SZ，并按8byte进行取整。
 // 最小取MINSIZE: (sizeof(malloc_chunk) + MALLOC_ALIGN_MASK) & ~MALLOC_ALIGN_MASK
+// [MINSIZE, (req + size_sz)按2*size_sz进行padding)
 #define request2size(req)                               \
   (((req) + SIZE_SZ + MALLOC_ALIGN_MASK < MINSIZE) ?    \
   MINSIZE :                                             \
@@ -235,6 +236,7 @@ static struct malloc_state av_; // never directly referenced
 #define get_malloc_state() (&(av_))
 
 // Initialize a malloc_state struct.
+// 初始化全局的malloc_state对象
 static void malloc_init_state(mstate av)
 {
   int i;
@@ -245,6 +247,7 @@ static void malloc_init_state(mstate av)
   fprintf(stderr, "%s SIZE_SZ: %lu, SIZE_SZ << 1: %lu\n",
           __FUNCTION__, SIZE_SZ, SIZE_SZ << 1);
 
+  /*
   for (i = 0; i < NBINS*2; ++i)
   {
     fprintf(stderr, "bins[%d] = %p\n", i, &(av->bins[i]));
@@ -253,6 +256,7 @@ static void malloc_init_state(mstate av)
   {
     fprintf(stderr, "bin_at(i = %d) = %p\n", i, bin_at(av, i));
   }
+  */
 
   // malloc_state => mchunkptr bins[NBINS * 2];
   fprintf(stderr, "%s sizeof(mchunkptr): %zu\n", __FUNCTION__, sizeof(mchunkptr));
@@ -275,10 +279,18 @@ static void malloc_init_state(mstate av)
   av->trim_threshold = DEFAULT_TRIM_THRESHOLD;
 
 #if MORECORE_CONTIGUOUS
+  // 设置av->morecore_properties的MORECORE_CONTIGUOUS_BIT属性
   set_contiguous(av);
 #else
+  // 清理av->morecore_properties的MORECORE_CONTIGUOUS_BIT属性
   set_noncontiguous(av);
 #endif
+
+  for (int i = 1; i <= DEFAULT_MXFAST; ++i)
+  {
+    set_max_fast(av, i);
+    fprintf(stderr, "(i: %d) => (max_fast: %d)\n", i, av->max_fast);
+  }
 
   set_max_fast(av, DEFAULT_MXFAST);
 
@@ -287,6 +299,7 @@ static void malloc_init_state(mstate av)
   av->pagesize = malloc_getpagesize;
 }
 
+// consolidate: 加强/巩固/合并
 static void malloc_consolidate(mstate av)
 {
   mfastbinptr* fb;              // current fastbin being consolidated
@@ -306,6 +319,7 @@ static void malloc_consolidate(mstate av)
 
   // If max_fast is 0, we know that av hasn't
   // yet been initialized, in which case do so below
+  // av->max_fast != 0，说明已经被初始化过。
   if (av->max_fast != 0)
   {
     clear_fastchunks(av);
@@ -365,6 +379,7 @@ static void malloc_consolidate(mstate av)
       }
     } while (fb++ != maxfb);
   }
+  // av->max_fast == 0，说明没有被初始化过。
   else
   {
     malloc_init_state(av);
@@ -424,7 +439,7 @@ static void* sysmalloc(size_t nb, mstate av)
   if (have_fastchunks(av))
   {
     malloc_consolidate(av);
-    return imalloc(nb - MALLOC_ALIGN_MASK);
+    return iMalloc(nb - MALLOC_ALIGN_MASK);
   }
 
 #if HAVE_MMAP
@@ -600,7 +615,7 @@ static void* sysmalloc(size_t nb, mstate av)
           {
             size_t tt = av->trim_threshold;
             av->trim_threshold = (size_t)(-1);
-            ifree(chunk2mem(old_top));
+            iFree(chunk2mem(old_top));
             av->trim_threshold = tt;
           }
         }
@@ -637,7 +652,7 @@ static void* sysmalloc(size_t nb, mstate av)
   return 0;
 }
 
-void* imalloc(size_t bytes)
+void* iMalloc(size_t bytes)
 {
   mstate av = get_malloc_state();
 
@@ -689,10 +704,22 @@ void* imalloc(size_t bytes)
   // Bypass search if no frees yet
   fprintf(stderr, "av->mx_fast: %zu, mx_fast & ANYCHUNKS_BIT(1U): %lu, have_anychunks: %s\n",
           av->max_fast, (av->max_fast & ANYCHUNKS_BIT), (av->max_fast & ANYCHUNKS_BIT) ? "TRUE" : "FALSE");
+
+  /*
+  for (int i = 0; i < 10; ++i)
+  {
+    fprintf(stderr, "i: %d => (i(%d) & ANYCHUNKS_BIT(%u)) = %d\n", i, i, ANYCHUNKS_BIT, (i & ANYCHUNKS_BIT));
+  }
+  */
+
+  // have_anychunks == 0(false)，说明av->max_fast为偶数，即0，2，4，6，8，...
+  // have_anychunks == 1(true)，说明av->max_fast为奇数，即1，3，5，7，9，...
   if (!have_anychunks(av))
   {
+    // 这里的av->max_fast为偶数
     if (av->max_fast == 0)    // initialization check
     {
+      // 这里的av->max_fast == 0
       malloc_consolidate(av);
     }
     goto use_top;
@@ -923,7 +950,7 @@ void* imalloc(size_t bytes)
   return sysmalloc(nb, av);
 }
 
-void ifree(void* mem)
+void iFree(void* mem)
 {
 
 }

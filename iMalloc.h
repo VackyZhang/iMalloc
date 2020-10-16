@@ -3,8 +3,8 @@
 
 #include <cstddef>
 
-void* imalloc(size_t bytes);
+void* iMalloc(size_t bytes);
 
-void ifree(void* mem);
+void iFree(void* mem);
 
-#endif//DLMALLOC_SRC_IMALLOC_H_
+#endif

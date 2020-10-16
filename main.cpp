@@ -3,7 +3,7 @@
 
 int main()
 {
-  void* ptr = imalloc(0);
+  void* ptr = iMalloc(0);
   fprintf(stderr, "ptr: %p\n", ptr);
   return 0;
 }
